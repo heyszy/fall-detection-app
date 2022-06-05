@@ -4,9 +4,11 @@ import time
 import torch
 import argparse
 import numpy as np
+import subprocess
+import requests
 
 from Detection.Utils import ResizePadding
-from CameraLoader import CamLoader, CamLoader_Q
+from CameraLoader import CamLoader, CamLoaderForVideo
 from DetectorLoader import TinyYOLOv3_onecls
 
 from PoseEstimateLoader import SPPE_FastPose
@@ -15,18 +17,32 @@ from fn import draw_single
 from Track.Tracker import Detection, Tracker
 from ActionsEstLoader import TSSTG
 
-#source = '../Data/test_video/test7.mp4'
-#source = '../Data/falldata/Home/Videos/video (2).avi'  # hard detect
-source = '../Data/falldata/Home/Videos/video (1).avi'
-#source = 2
+from threading import Timer
+
+source = './test.mp4'
+# source = 'rtsp://192.168.31.58:8554/live1.h264'
+# source = 'rtmp://localhost/live/JETSON_NANO'
+# source = 'rtmp://localhost/live/test'
+# source = 0
+out = 'result.mp4'
+
+# rtmp = r'rtmp://localhost/live/FD'
+
+# https://wxpusher.zjiecode.com/ WxPusher 提供的微信消息推送服务
+url = 'http://wxpusher.zjiecode.com/api/send/message/'
+params = {
+    'appToken': 'AT_Y3GB4WcwHP2NNoBT3pSqOK337ctxWlCP',
+    'content': '检测到摔倒行为发生',
+    'uid': 'UID_ABaGAlqE4qJnJ8f0qnATlTHUyz23',
+}
 
 
-def preproc(image):
+def preproc(img):
     """preprocess function for CameraLoader.
     """
-    image = resize_fn(image)
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    return image
+    img = resize_fn(img)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    return img
 
 
 def kpt2bbox(kpt, ex=20):
@@ -41,21 +57,23 @@ def kpt2bbox(kpt, ex=20):
 if __name__ == '__main__':
     par = argparse.ArgumentParser(description='Human Fall Detection Demo.')
     par.add_argument('-C', '--camera', default=source,  # required=True,  # default=2,
-                        help='Source of camera or video file path.')
+                     help='Source of camera or video file path.')
     par.add_argument('--detection_input_size', type=int, default=384,
-                        help='Size of input in detection model in square must be divisible by 32 (int).')
+                     help='Size of input in detection model in square must be divisible by 32 (int).')
     par.add_argument('--pose_input_size', type=str, default='224x160',
-                        help='Size of input in pose model must be divisible by 32 (h, w)')
+                     help='Size of input in pose model must be divisible by 32 (h, w)')
     par.add_argument('--pose_backbone', type=str, default='resnet50',
-                        help='Backbone model for SPPE FastPose model.')
+                     help='Backbone model for SPPE FastPose model.')
     par.add_argument('--show_detected', default=False, action='store_true',
-                        help='Show all bounding box from detection.')
+                     help='Show all bounding box from detection.')
     par.add_argument('--show_skeleton', default=True, action='store_true',
-                        help='Show skeleton pose.')
-    par.add_argument('--save_out', type=str, default='',
-                        help='Save display to video file.')
+                     help='Show skeleton pose.')
+    par.add_argument('--save_out', type=str, default=out,
+                     help='Save display to video file.')
     par.add_argument('--device', type=str, default='cuda',
-                        help='Device to run model on cpu or cuda.')
+                     help='Device to run model on cpu or cuda.')
+    par.add_argument('--stream_out', type=str, default='',
+                     help='推流输出地址')
     args = par.parse_args()
 
     device = args.device
@@ -81,27 +99,56 @@ if __name__ == '__main__':
     cam_source = args.camera
     if type(cam_source) is str and os.path.isfile(cam_source):
         # Use loader thread with Q for video file.
-        cam = CamLoader_Q(cam_source, queue_size=1000, preprocess=preproc).start()
+        cam = CamLoaderForVideo(cam_source, queue_size=3000, preprocess=preproc).start()
     else:
         # Use normal thread loader for webcam.
-        cam = CamLoader(int(cam_source) if cam_source.isdigit() else cam_source,
-                        preprocess=preproc).start()
+        cam = CamLoader(int(cam_source) if cam_source.isdigit() else cam_source, preprocess=preproc).start()
 
-    #frame_size = cam.frame_size
-    #scf = torch.min(inp_size / torch.FloatTensor([frame_size]), 1)[0]
+    # frame_size = cam.frame_size
+    # scf = torch.min(inp_size / torch.FloatTensor([frame_size]), 1)[0]
 
-    outvid = False
-    if args.save_out != '':
-        outvid = True
-        codec = cv2.VideoWriter_fourcc(*'MJPG')
+    is_save_out = False
+    if not cam_source.startswith('rtmp') and args.save_out != '':
+        is_save_out = True
+        codec = cv2.VideoWriter_fourcc(*'avc1')
         writer = cv2.VideoWriter(args.save_out, codec, 30, (inp_dets * 2, inp_dets * 2))
 
     fps_time = 0
     f = 0
+
+    is_stream_out = False
+    if args.stream_out != '':
+        is_stream_out = True
+        sizeStr = str(inp_dets * 2) + 'x' + str(inp_dets * 2)
+        command = ['ffmpeg',
+                   '-y', '-an',
+                   '-f', 'rawvideo',
+                   '-vcodec', 'rawvideo',
+                   '-pix_fmt', 'bgr24',
+                   '-s', sizeStr,
+                   '-r', '15',
+                   '-i', '-',
+                   '-c:v', 'libx264',
+                   '-pix_fmt', 'yuv420p',
+                   '-preset', 'ultrafast',
+                   '-f', 'flv',
+                   args.stream_out]
+        pipe = subprocess.Popen(command, shell=False, stdin=subprocess.PIPE)
+
+    can_alert = True
+
+    fall_detect_count = 0
+
+
+    def set_can_alert():
+        global can_alert
+        can_alert = True
+
+
     while cam.grabbed():
         f += 1
         frame = cam.getitem()
-        image = frame.copy()
+        # image = frame.copy()
 
         # Detect humans bbox in the frame with detector model.
         detected = detect_model.detect(frame, need_resize=False, expand_bb=10)
@@ -115,7 +162,7 @@ if __name__ == '__main__':
 
         detections = []  # List of Detections object for tracking.
         if detected is not None:
-            #detected = non_max_suppression(detected[None, :], 0.45, 0.2)[0]
+            # detected = non_max_suppression(detected[None, :], 0.45, 0.2)[0]
             # Predict skeleton pose of each bboxs.
             poses = pose_model.predict(frame, detected[:, 0:4], detected[:, 4])
 
@@ -152,7 +199,17 @@ if __name__ == '__main__':
                 action_name = action_model.class_names[out[0].argmax()]
                 action = '{}: {:.2f}%'.format(action_name, out[0].max() * 100)
                 if action_name == 'Fall Down':
+                    # print("Fall Detected!")
                     clr = (255, 0, 0)
+                    if can_alert:
+                        fall_detect_count += 1
+                    if type(cam_source) is str and cam_source.startswith(
+                            'rtmp') and fall_detect_count == 5 and can_alert:
+                        requests.get(url, params)
+                        can_alert = False
+                        fall_detect_count = 0
+                        t = Timer(30.0, set_can_alert)
+                        t.start()
                 elif action_name == 'Lying Down':
                     clr = (255, 200, 0)
 
@@ -173,15 +230,22 @@ if __name__ == '__main__':
         frame = frame[:, :, ::-1]
         fps_time = time.time()
 
-        if outvid:
+        if is_save_out:
             writer.write(frame)
 
         cv2.imshow('frame', frame)
+
+        if is_stream_out:
+            pipe.stdin.write(frame.tostring())
+
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
     # Clear resource.
     cam.stop()
-    if outvid:
+
+    if is_save_out:
         writer.release()
     cv2.destroyAllWindows()
+    if is_stream_out:
+        pipe.terminate()

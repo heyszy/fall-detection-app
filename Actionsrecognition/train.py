@@ -18,7 +18,7 @@ save_folder = 'saved/TSSTG(pts+mot)-01(cf+hm-hm)'
 
 device = 'cuda'
 epochs = 30
-batch_size = 32
+batch_size = 16
 
 # DATA FILES.
 # Should be in format of

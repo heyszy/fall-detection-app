@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 from PIL import Image, ImageTk
 
 from Detection.Utils import ResizePadding
-from CameraLoader import CamLoader, CamLoader_Q
+from CameraLoader import CamLoader, CamLoaderForVideo
 from DetectorLoader import TinyYOLOv3_onecls
 
 from PoseEstimateLoader import SPPE_FastPose
@@ -148,7 +148,7 @@ class main:
             self.cam.__del__()
 
         if type(source) is str and os.path.isfile(source):
-            self.cam = CamLoader_Q(source, queue_size=1000, preprocess=self.preproc).start()
+            self.cam = CamLoaderForVideo(source, queue_size=1000, preprocess=self.preproc).start()
         else:
             self.cam = CamLoader(source, preprocess=self.preproc).start()
 

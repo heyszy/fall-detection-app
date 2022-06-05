@@ -16,7 +16,9 @@ class CamLoader:
         camera: (int, str) Source of camera or video.,
         preprocess: (Callable function) to process the frame before return.
     """
+
     def __init__(self, camera, preprocess=None, ori_return=False):
+        self.t = None
         self.stream = cv2.VideoCapture(camera)
         assert self.stream.isOpened(), 'Cannot read camera source!'
         self.fps = self.stream.get(cv2.CAP_PROP_FPS)
@@ -39,7 +41,7 @@ class CamLoader:
         while not self.ret:
             time.sleep(0.1)
             c += 1
-            if c > 20:
+            if c > 100:
                 self.stop()
                 raise TimeoutError('Can not get a frame from camera!!!')
         return self
@@ -86,7 +88,7 @@ class CamLoader:
             self.stream.release()
 
 
-class CamLoader_Q:
+class CamLoaderForVideo:
     """Use threading and queue to capture a frame and store to queue for pickup in sequence.
     Recommend for video file.
 
@@ -96,6 +98,7 @@ class CamLoader_Q:
         queue_size: (int) Maximum queue size. Default: 256,
         preprocess: (Callable function) to process the frame before return.
     """
+
     def __init__(self, camera, batch_size=1, queue_size=256, preprocess=None):
         self.stream = cv2.VideoCapture(camera)
         assert self.stream.isOpened(), 'Cannot read camera source!'
@@ -113,6 +116,8 @@ class CamLoader_Q:
 
     def start(self):
         t = Thread(target=self.update, args=(), daemon=True).start()
+
+        # 连续 2s 队列为空（抓取不到图像）则报错
         c = 0
         while not self.grabbed():
             time.sleep(0.1)
@@ -125,7 +130,7 @@ class CamLoader_Q:
     def update(self):
         while not self.stopped:
             if not self.Q.full():
-                frames = []
+                frame_list = []
                 for k in range(self.batch_size):
                     ret, frame = self.stream.read()
                     if not ret:
@@ -135,9 +140,9 @@ class CamLoader_Q:
                     if self.preprocess_fn is not None:
                         frame = self.preprocess_fn(frame)
 
-                    frames.append(frame)
-                    frames = np.stack(frames)
-                    self.Q.put(frames)
+                    frame_list.append(frame)
+                    frame_list = np.stack(frame_list)
+                    self.Q.put(frame_list)
             else:
                 with self.Q.mutex:
                     self.Q.queue.clear()
@@ -173,6 +178,7 @@ if __name__ == '__main__':
 
     # Using threading.
     cam = CamLoader(0).start()
+
     while cam.grabbed():
         frames = cam.getitem()
 
